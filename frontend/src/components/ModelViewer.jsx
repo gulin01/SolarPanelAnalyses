@@ -200,7 +200,12 @@ export default function ModelViewer({
       meshes.forEach((mesh) => {
         const v = heatmapValues[mesh.userData.faceId];
         const t = v != null ? (v - minV) / range : 0;
-        mesh.material.color.copy(heatColor(t));
+        const hc = heatColor(t);
+        // Set both diffuse color and emissive so the heatmap gradient is
+        // visible regardless of the scene lighting angle.
+        mesh.material.color.copy(hc);
+        mesh.material.emissive.copy(hc);
+        mesh.material.emissiveIntensity = 0.65;
         mesh.material.opacity = 1;
         mesh.material.transparent = false;
       });
@@ -208,6 +213,8 @@ export default function ModelViewer({
       meshes.forEach((mesh) => {
         const selected = selectedIds.has(mesh.userData.faceId);
         mesh.material.color.set(selected ? 0xf59e0b : 0x4a90d9);
+        mesh.material.emissive.set(selected ? 0xf59e0b : 0x000000);
+        mesh.material.emissiveIntensity = selected ? 0.3 : 0;
         mesh.material.opacity = selected ? 1 : 0.85;
         mesh.material.transparent = !selected;
       });

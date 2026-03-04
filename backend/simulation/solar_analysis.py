@@ -70,6 +70,36 @@ def run_simulation(
     results: List[Dict[str, Any]] = []
     for face in faces:
         tilt, azimuth = _surface_params(face["normal"])
+
+        base = {
+            "id": face["id"],
+            "name": face["name"],
+            "area": face["area"],
+            "surface_tilt_deg": round(tilt, 1),
+            "surface_azimuth_deg": round(azimuth, 1),
+        }
+
+        # Surfaces whose outward normal points below horizontal (tilt > 90°) cannot
+        # be used for solar panels — zero their radiation instead of running pvlib,
+        # which would otherwise compute misleading ground-reflection values.
+        if tilt > 90.0:
+            if analysis_type == "annual":
+                base.update({
+                    "annual_kwh_m2": 0.0,
+                    "monthly_kwh_m2": [0.0] * 12,
+                    "_downward": True,
+                })
+            else:
+                base.update({
+                    "daily_kwh_m2": 0.0,
+                    "hourly_wh_m2": [0.0] * 24,
+                    "peak_hour": 0,
+                    "peak_wh_m2": 0.0,
+                    "_downward": True,
+                })
+            results.append(base)
+            continue
+
         poa = pvlib.irradiance.get_total_irradiance(
             surface_tilt=tilt,
             surface_azimuth=azimuth,
@@ -82,14 +112,6 @@ def run_simulation(
             dni_extra=dni_extra,
         )
         poa_wh = poa["poa_global"].fillna(0.0).clip(lower=0.0)
-
-        base = {
-            "id": face["id"],
-            "name": face["name"],
-            "area": face["area"],
-            "surface_tilt_deg": round(tilt, 1),
-            "surface_azimuth_deg": round(azimuth, 1),
-        }
 
         if analysis_type == "annual":
             monthly_kwh = _monthly_kwh(poa_wh)
@@ -115,12 +137,15 @@ def run_simulation(
     key = "annual_kwh_m2" if analysis_type == "annual" else "daily_kwh_m2"
     results.sort(key=lambda r: r[key], reverse=True)
 
-    # Add suitability scores relative to the best face
+    # Add suitability scores relative to the best (non-zero) face
     best = results[0][key] if results else 1.0
     for r in results:
         score = round((r[key] / best) * 100, 1) if best > 0 else 0.0
         r["suitability_score"] = score
-        r["recommendation"] = _recommendation(score)
+        if r.pop("_downward", False):
+            r["recommendation"] = "Not suitable — downward-facing surface"
+        else:
+            r["recommendation"] = _recommendation(score)
 
     extra: Dict[str, Any] = {"type": analysis_type, "timezone": tz}
     if analysis_type == "annual":

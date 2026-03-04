@@ -42,7 +42,7 @@ export default function Results({ faces, results, onReset }) {
   }, [simFaces, isDaily, results.hourly, currentHour]);
 
   const heatVals = Object.values(heatmapValues);
-  const minVal = Math.min(...heatVals, 0);
+  const minVal = Math.min(...heatVals);
   const maxVal = Math.max(...heatVals, 1);
 
   const best = simFaces[0];
