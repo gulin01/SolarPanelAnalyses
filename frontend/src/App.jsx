@@ -1,28 +1,61 @@
-import React from 'react';
-import { Routes, Route, NavLink } from 'react-router-dom';
-import Dashboard from './pages/Dashboard';
-import Panels from './pages/Panels';
-import Analytics from './pages/Analytics';
+import React, { useState } from 'react';
+import StepEpw from './steps/StepEpw';
+import StepModel from './steps/StepModel';
+import StepSimulate from './steps/StepSimulate';
+import Results from './pages/Results';
 import './styles/App.css';
 
+const STEPS = ['1. Weather Data', '2. 3D Model', '3. Simulate'];
+
 export default function App() {
+  const [step, setStep] = useState(0);
+  const [session, setSession] = useState(null);   // { id, city, country, latitude, ... }
+  const [faces, setFaces] = useState(null);        // list of face dicts
+  const [results, setResults] = useState(null);    // simulation results
+
+  const goNext = () => setStep((s) => s + 1);
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Solar Panel Analyses</h1>
-        <nav>
-          <NavLink to="/" end>Dashboard</NavLink>
-          <NavLink to="/panels">Panels</NavLink>
-          <NavLink to="/analytics">Analytics</NavLink>
-        </nav>
+        <div className="header-inner">
+          <div className="logo">
+            <span className="logo-icon">☀</span>
+            <span>Solar Panel Analyser</span>
+          </div>
+          <p className="subtitle">Powered by Ladybug Tools</p>
+        </div>
       </header>
-      <main className="app-main">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/panels" element={<Panels />} />
-          <Route path="/analytics" element={<Analytics />} />
-        </Routes>
-      </main>
+
+      {results ? (
+        <Results results={results} session={session} onReset={() => {
+          setStep(0); setSession(null); setFaces(null); setResults(null);
+        }} />
+      ) : (
+        <main className="app-main">
+          <div className="stepper">
+            {STEPS.map((label, i) => (
+              <div key={i} className={`step-item ${i === step ? 'active' : ''} ${i < step ? 'done' : ''}`}>
+                <div className="step-circle">{i < step ? '✓' : i + 1}</div>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="step-content">
+            {step === 0 && (
+              <StepEpw onDone={(s) => { setSession(s); goNext(); }} />
+            )}
+            {step === 1 && (
+              <StepModel sessionId={session?.session_id} onDone={(f) => { setFaces(f); goNext(); }} />
+            )}
+            {step === 2 && (
+              <StepSimulate sessionId={session?.session_id} session={session} faces={faces}
+                onDone={(r) => setResults(r)} />
+            )}
+          </div>
+        </main>
+      )}
     </div>
   );
 }
