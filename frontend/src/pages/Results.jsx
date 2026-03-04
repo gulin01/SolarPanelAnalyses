@@ -1,10 +1,18 @@
-import React, { useEffect, useRef } from 'react';
-import * as THREE from 'three';
+/**
+ * Results — heatmap 3D model + ranked table + time slider (daily mode).
+ *
+ * Props
+ *   faces    : original face objects from OBJ upload (need triangles for rendering)
+ *   results  : simulation response { type, timezone, faces, [hourly, date, sunrise_hour, sunset_hour] }
+ *   onReset  : () => void
+ */
+import React, { useMemo, useState } from 'react';
+import ModelViewer from '../components/ModelViewer';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-/** Map a 0–100 score to a heatmap colour (blue → green → red). */
-function scoreToHex(score) {
+// ── colour helpers ──────────────────────────────────────────────────────────
+function scoreToCSS(score) {
   const t = score / 100;
   const r = Math.round(Math.min(255, t * 2 * 255));
   const g = Math.round(Math.min(255, (1 - Math.abs(t - 0.5) * 2) * 255));
@@ -12,35 +20,115 @@ function scoreToHex(score) {
   return `rgb(${r},${g},${b})`;
 }
 
-export default function Results({ results, session, onReset }) {
-  const { results: faces = [], best_surface } = results;
+// ── component ───────────────────────────────────────────────────────────────
+export default function Results({ faces, results, onReset }) {
+  const [currentHour, setCurrentHour] = useState(
+    results.type === 'daily' ? (results.sunrise_hour ?? 12) : 0,
+  );
+
+  const isDaily = results.type === 'daily';
+  const simFaces = results.faces;  // simulation result faces (sorted by radiation)
+
+  // ── heatmap values for the 3D viewer ──────────────────────────────────────
+  const heatmapValues = useMemo(() => {
+    if (isDaily && results.hourly) {
+      // Per-hour W/m²
+      return Object.fromEntries(
+        Object.entries(results.hourly).map(([id, arr]) => [id, arr[currentHour] ?? 0]),
+      );
+    }
+    // Annual kWh/m²
+    return Object.fromEntries(simFaces.map((f) => [f.id, f.annual_kwh_m2 ?? 0]));
+  }, [simFaces, isDaily, results.hourly, currentHour]);
+
+  const heatVals = Object.values(heatmapValues);
+  const minVal = Math.min(...heatVals, 0);
+  const maxVal = Math.max(...heatVals, 1);
+
+  const best = simFaces[0];
 
   return (
     <main className="app-main">
+      {/* Header */}
       <div className="results-header">
         <div>
           <h2>Simulation Results</h2>
-          <p className="hint">{session?.city}, {session?.country} — {faces.length} surfaces analysed</p>
+          <p className="hint">
+            {isDaily
+              ? `${results.date} · ${results.timezone}`
+              : `Annual clear-sky · ${results.timezone}`}
+            &nbsp;— {simFaces.length} surface{simFaces.length !== 1 ? 's' : ''} analysed
+          </p>
         </div>
         <button className="btn-secondary" onClick={onReset}>↩ Start Over</button>
       </div>
 
-      {best_surface && (
+      {/* Best surface banner */}
+      {best && (
         <div className="best-card">
           <div className="best-badge">Best Surface</div>
-          <h3>{best_surface.id}</h3>
-          <p>{best_surface.recommendation}</p>
+          <h3>{best.name}</h3>
+          <p>{best.recommendation}</p>
           <div className="best-stats">
-            <Stat label="Annual irradiation" value={`${best_surface.annual_irradiation_kwh_m2} kWh/m²`} />
-            <Stat label="Area" value={`${best_surface.area} m²`} />
-            <Stat label="Suitability score" value={`${best_surface.suitability_score} / 100`} />
+            <Stat label={isDaily ? 'Daily irradiation' : 'Annual irradiation'}
+                  value={isDaily ? `${best.daily_kwh_m2} kWh/m²` : `${best.annual_kwh_m2} kWh/m²`} />
+            <Stat label="Area"           value={`${best.area} m²`} />
+            <Stat label="Tilt / Azimuth" value={`${best.surface_tilt_deg}° / ${best.surface_azimuth_deg}°`} />
+            <Stat label="Score"          value={`${best.suitability_score} / 100`} />
           </div>
         </div>
       )}
 
-      <ThreeViewer faces={faces} />
+      {/* 3D Heatmap viewer */}
+      <div className="heatmap-viewer-wrap">
+        <ModelViewer
+          faces={faces}
+          mode="heatmap"
+          heatmapValues={heatmapValues}
+          height="460px"
+        />
+        {/* Colour scale legend */}
+        <div className="scale-legend">
+          <div className="scale-gradient" />
+          <div className="scale-ticks">
+            <span>{maxVal.toFixed(isDaily ? 0 : 0)}</span>
+            <span>{((maxVal + minVal) / 2).toFixed(0)}</span>
+            <span>{minVal.toFixed(0)}</span>
+          </div>
+          <div className="scale-unit">{isDaily ? 'W/m²' : 'kWh/m²'}</div>
+        </div>
+      </div>
 
-      <h3 style={{ margin: '1.5rem 0 .5rem' }}>All Surfaces — Ranked by Solar Potential</h3>
+      {/* Time slider — daily mode only */}
+      {isDaily && results.hourly && (
+        <div className="time-slider-card">
+          <div className="time-slider-header">
+            <h3>Hour: {String(currentHour).padStart(2, '0')}:00</h3>
+            <span className="time-irr">
+              {Object.values(heatmapValues).reduce((s, v) => s + v, 0).toFixed(0)} W/m² total across surfaces
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0} max={23}
+            value={currentHour}
+            onChange={(e) => setCurrentHour(Number(e.target.value))}
+            className="time-slider"
+          />
+          <div className="hour-axis">
+            {[0, 3, 6, 9, 12, 15, 18, 21, 23].map((h) => (
+              <span key={h}
+                style={{ left: `${(h / 23) * 100}%` }}
+                className={h === currentHour ? 'active-hour' : ''}>
+                {h}h
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Ranked table */}
+      <h3 style={{ margin: '1.5rem 0 .5rem' }}>Surfaces Ranked by Solar Potential</h3>
       <div className="results-table-wrapper">
         <table>
           <thead>
@@ -48,27 +136,27 @@ export default function Results({ results, session, onReset }) {
               <th>#</th>
               <th>Surface</th>
               <th>Score</th>
-              <th>Irradiation (kWh/m²)</th>
+              <th>{isDaily ? 'Daily (kWh/m²)' : 'Annual (kWh/m²)'}</th>
               <th>Area (m²)</th>
+              <th>Tilt / Azimuth</th>
               <th>Recommendation</th>
             </tr>
           </thead>
           <tbody>
-            {faces.map((f, i) => (
+            {simFaces.map((f, i) => (
               <tr key={f.id}>
                 <td>{i + 1}</td>
-                <td><strong>{f.id}</strong></td>
+                <td><strong>{f.name}</strong></td>
                 <td>
                   <div className="score-bar-wrap">
-                    <div className="score-bar" style={{
-                      width: `${f.suitability_score}%`,
-                      background: scoreToHex(f.suitability_score),
-                    }} />
+                    <div className="score-bar"
+                      style={{ width: `${f.suitability_score}%`, background: scoreToCSS(f.suitability_score) }} />
                     <span>{f.suitability_score}</span>
                   </div>
                 </td>
-                <td>{f.annual_irradiation_kwh_m2}</td>
+                <td>{isDaily ? f.daily_kwh_m2 : f.annual_kwh_m2}</td>
                 <td>{f.area}</td>
+                <td>{f.surface_tilt_deg}° / {f.surface_azimuth_deg}°</td>
                 <td className="recommendation">{f.recommendation}</td>
               </tr>
             ))}
@@ -76,12 +164,29 @@ export default function Results({ results, session, onReset }) {
         </table>
       </div>
 
-      <h3 style={{ margin: '1.5rem 0 .5rem' }}>Monthly Irradiation (kWh/m²) by Surface</h3>
-      <div className="monthly-grid">
-        {faces.slice(0, 4).map((f) => (
-          <MonthlyChart key={f.id} face={f} />
-        ))}
-      </div>
+      {/* Monthly breakdown — annual mode only */}
+      {!isDaily && (
+        <>
+          <h3 style={{ margin: '1.5rem 0 .5rem' }}>Monthly Irradiation (kWh/m²)</h3>
+          <div className="monthly-grid">
+            {simFaces.slice(0, 4).map((f) => (
+              <MonthlyChart key={f.id} face={f} score={f.suitability_score} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Hourly profile — daily mode */}
+      {isDaily && (
+        <>
+          <h3 style={{ margin: '1.5rem 0 .5rem' }}>Hourly Profile (W/m²)</h3>
+          <div className="monthly-grid">
+            {simFaces.slice(0, 4).map((f) => (
+              <HourlyChart key={f.id} face={f} currentHour={currentHour} />
+            ))}
+          </div>
+        </>
+      )}
     </main>
   );
 }
@@ -95,18 +200,17 @@ function Stat({ label, value }) {
   );
 }
 
-function MonthlyChart({ face }) {
-  const max = Math.max(...face.monthly_kwh_m2, 1);
+function MonthlyChart({ face, score }) {
+  const vals = face.monthly_kwh_m2 ?? [];
+  const max = Math.max(...vals, 1);
   return (
     <div className="monthly-card">
-      <h4>{face.id}</h4>
+      <h4>{face.name}</h4>
       <div className="month-bar-chart">
-        {face.monthly_kwh_m2.map((v, i) => (
+        {vals.map((v, i) => (
           <div key={i} className="month-col">
-            <div className="bar-fill" style={{
-              height: `${(v / max) * 60}px`,
-              background: scoreToHex(face.suitability_score),
-            }} />
+            <div className="bar-fill"
+              style={{ height: `${(v / max) * 64}px`, background: scoreToCSS(score) }} />
             <span className="month-label">{MONTHS[i]}</span>
           </div>
         ))}
@@ -115,95 +219,23 @@ function MonthlyChart({ face }) {
   );
 }
 
-/** Three.js 3D viewer — colours faces by suitability score. */
-function ThreeViewer({ faces }) {
-  const mountRef = useRef(null);
-
-  useEffect(() => {
-    if (!faces.length) return;
-    const el = mountRef.current;
-    const W = el.clientWidth, H = 380;
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(W, H);
-    el.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 1000);
-
-    // Centre and scale model
-    const allPts = faces.flatMap((f) => f.vertices);
-    const xs = allPts.map((p) => p[0]);
-    const ys = allPts.map((p) => p[1]);
-    const zs = allPts.map((p) => p[2]);
-    const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
-    const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
-    const cz = (Math.max(...zs) + Math.min(...zs)) / 2;
-    const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), Math.max(...zs) - Math.min(...zs));
-    camera.position.set(cx + span * 1.2, cy - span * 1.5, cz + span * 1.2);
-    camera.lookAt(cx, cy, cz);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-    dir.position.set(1, 1, 2);
-    scene.add(dir);
-
-    // Build geometry per face
-    const scoreMap = Object.fromEntries(faces.map((f) => [f.id, f.suitability_score]));
-
-    faces.forEach((face) => {
-      const verts = face.vertices;
-      const geom = new THREE.BufferGeometry();
-      // Fan-triangulate polygon
-      const positions = [];
-      for (let i = 1; i < verts.length - 1; i++) {
-        positions.push(...verts[0], ...verts[i], ...verts[i + 1]);
-      }
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      geom.computeVertexNormals();
-
-      const score = scoreMap[face.id] ?? 0;
-      const t = score / 100;
-      const color = new THREE.Color(
-        Math.min(1, t * 2),
-        Math.min(1, (1 - Math.abs(t - 0.5) * 2)),
-        Math.max(0, 1 - t * 2),
-      );
-      const mat = new THREE.MeshPhongMaterial({ color, side: THREE.DoubleSide, opacity: 0.9, transparent: true });
-      scene.add(new THREE.Mesh(geom, mat));
-
-      // Wireframe
-      const wmat = new THREE.LineBasicMaterial({ color: 0x333333, opacity: 0.3, transparent: true });
-      scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(geom), wmat));
-    });
-
-    // Simple rotation animation
-    let animId;
-    const pivot = new THREE.Vector3(cx, cy, cz);
-    let angle = 0;
-    const animate = () => {
-      animId = requestAnimationFrame(animate);
-      angle += 0.005;
-      const r = span * 1.8;
-      camera.position.set(cx + r * Math.sin(angle), cy - span * 0.8, cz + r * Math.cos(angle));
-      camera.lookAt(pivot);
-      renderer.render(scene, camera);
-    };
-    animate();
-
-    return () => {
-      cancelAnimationFrame(animId);
-      renderer.dispose();
-      if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
-    };
-  }, [faces]);
-
+function HourlyChart({ face, currentHour }) {
+  const vals = face.hourly_wh_m2 ?? Array(24).fill(0);
+  const max = Math.max(...vals, 1);
   return (
-    <div className="three-viewer" ref={mountRef}>
-      <div className="viewer-legend">
-        <span style={{ color: 'rgb(0,200,255)' }}>◼ Low</span>
-        <span style={{ color: 'rgb(100,255,100)' }}>◼ Medium</span>
-        <span style={{ color: 'rgb(255,80,0)' }}>◼ High</span>
+    <div className="monthly-card">
+      <h4>{face.name} <small>({face.daily_kwh_m2} kWh/m²/day)</small></h4>
+      <div className="month-bar-chart">
+        {vals.map((v, i) => (
+          <div key={i} className="month-col">
+            <div className="bar-fill"
+              style={{
+                height: `${(v / max) * 64}px`,
+                background: i === currentHour ? '#f59e0b' : '#3b82f6',
+              }} />
+            <span className="month-label">{i % 6 === 0 ? `${i}h` : ''}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

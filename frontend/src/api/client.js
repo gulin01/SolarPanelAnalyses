@@ -10,35 +10,31 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  /** Upload EPW file → returns { session_id, city, country, latitude, ... } */
-  uploadEpw(file) {
+  /**
+   * Upload OBJ file → returns { session_id, surface_count, faces }
+   * Each face: { id, name, triangles, normal, area, centroid }
+   */
+  uploadObj(file) {
     const form = new FormData();
     form.append('file', file);
-    return request('/api/epw/upload', { method: 'POST', body: form });
+    return request('/api/model/upload', { method: 'POST', body: form });
   },
 
-  /** Upload OBJ model for a session → returns { face_count, faces } */
-  uploadObj(sessionId, file) {
-    const form = new FormData();
-    form.append('file', file);
-    return request(`/api/model/upload-obj?session_id=${sessionId}`, { method: 'POST', body: form });
-  },
-
-  /** Generate parametric box building → returns { face_count, faces } */
-  parametricBuilding(params) {
-    return request('/api/model/parametric', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-  },
-
-  /** Run simulation → returns { results, best_surface, ... } */
-  simulate(sessionId) {
+  /**
+   * Run radiation simulation.
+   * params: {
+   *   session_id, lat, lon, elevation,
+   *   analysis_type: 'annual'|'daily',
+   *   date?: 'YYYY-MM-DD',
+   *   selected_face_ids?: string[]   ([] = all faces)
+   * }
+   * Returns: { type, timezone, faces, [hourly, date, sunrise_hour, sunset_hour] }
+   */
+  simulate(params) {
     return request('/api/simulate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify(params),
     });
   },
 };

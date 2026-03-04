@@ -1,19 +1,21 @@
 import React, { useState } from 'react';
-import StepEpw from './steps/StepEpw';
-import StepModel from './steps/StepModel';
-import StepSimulate from './steps/StepSimulate';
-import Results from './pages/Results';
+import StepModel     from './steps/StepModel';
+import StepConfigure from './steps/StepConfigure';
+import Results       from './pages/Results';
 import './styles/App.css';
 
-const STEPS = ['1. Weather Data', '2. 3D Model', '3. Simulate'];
+const STEPS = ['1. Upload Model', '2. Location & Simulate', '3. Results'];
 
 export default function App() {
-  const [step, setStep] = useState(0);
-  const [session, setSession] = useState(null);   // { id, city, country, latitude, ... }
-  const [faces, setFaces] = useState(null);        // list of face dicts
-  const [results, setResults] = useState(null);    // simulation results
+  const [step,            setStep]            = useState(0);
+  const [sessionId,       setSessionId]       = useState(null);
+  const [faces,           setFaces]           = useState([]);     // original geometry (needed by Results)
+  const [selectedFaceIds, setSelectedFaceIds] = useState([]);     // [] = all
+  const [results,         setResults]         = useState(null);
 
-  const goNext = () => setStep((s) => s + 1);
+  const reset = () => {
+    setStep(0); setSessionId(null); setFaces([]); setSelectedFaceIds([]); setResults(null);
+  };
 
   return (
     <div className="app">
@@ -23,14 +25,12 @@ export default function App() {
             <span className="logo-icon">☀</span>
             <span>Solar Panel Analyser</span>
           </div>
-          <p className="subtitle">Powered by Ladybug Tools</p>
+          <p className="subtitle">Powered by pvlib · Ladybug geometry · Three.js · Leaflet</p>
         </div>
       </header>
 
       {results ? (
-        <Results results={results} session={session} onReset={() => {
-          setStep(0); setSession(null); setFaces(null); setResults(null);
-        }} />
+        <Results faces={faces} results={results} onReset={reset} />
       ) : (
         <main className="app-main">
           <div className="stepper">
@@ -44,14 +44,22 @@ export default function App() {
 
           <div className="step-content">
             {step === 0 && (
-              <StepEpw onDone={(s) => { setSession(s); goNext(); }} />
+              <StepModel
+                onDone={({ sessionId: sid, faces: f, selectedFaceIds: sel }) => {
+                  setSessionId(sid);
+                  setFaces(f);
+                  setSelectedFaceIds(sel);
+                  setStep(1);
+                }}
+              />
             )}
             {step === 1 && (
-              <StepModel sessionId={session?.session_id} onDone={(f) => { setFaces(f); goNext(); }} />
-            )}
-            {step === 2 && (
-              <StepSimulate sessionId={session?.session_id} session={session} faces={faces}
-                onDone={(r) => setResults(r)} />
+              <StepConfigure
+                sessionId={sessionId}
+                faces={faces}
+                selectedFaceIds={selectedFaceIds}
+                onDone={(data) => { setResults(data); setStep(2); }}
+              />
             )}
           </div>
         </main>
