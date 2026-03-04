@@ -1,0 +1,7 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+ladybug-core>=0.44.0
+ladybug-geometry>=1.34.0
+honeybee-core>=1.64.0
+honeybee-radiance>=1.66.0

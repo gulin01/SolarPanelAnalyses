@@ -1,23 +1,44 @@
-const BASE = import.meta.env.VITE_API_BASE_URL || '';
+const BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`API error ${res.status}`);
-  if (res.status === 204) return null;
+  const res = await fetch(`${BASE}${path}`, options);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `HTTP ${res.status}`);
+  }
   return res.json();
 }
 
 export const api = {
-  getPanels: () => request('/api/panels'),
-  getPanel: (id) => request(`/api/panels/${id}`),
-  createPanel: (data) => request('/api/panels', { method: 'POST', body: JSON.stringify(data) }),
-  updatePanel: (id, data) => request(`/api/panels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deletePanel: (id) => request(`/api/panels/${id}`, { method: 'DELETE' }),
+  /** Upload EPW file → returns { session_id, city, country, latitude, ... } */
+  uploadEpw(file) {
+    const form = new FormData();
+    form.append('file', file);
+    return request('/api/epw/upload', { method: 'POST', body: form });
+  },
 
-  getSummary: () => request('/api/analytics/summary'),
-  getEnergyOutput: () => request('/api/analytics/energy-output'),
-  getEfficiency: () => request('/api/analytics/efficiency'),
+  /** Upload OBJ model for a session → returns { face_count, faces } */
+  uploadObj(sessionId, file) {
+    const form = new FormData();
+    form.append('file', file);
+    return request(`/api/model/upload-obj?session_id=${sessionId}`, { method: 'POST', body: form });
+  },
+
+  /** Generate parametric box building → returns { face_count, faces } */
+  parametricBuilding(params) {
+    return request('/api/model/parametric', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  },
+
+  /** Run simulation → returns { results, best_surface, ... } */
+  simulate(sessionId) {
+    return request('/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  },
 };
