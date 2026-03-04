@@ -1,36 +1,30 @@
-import React, { useState } from 'react';
+/**
+ * StepModel — OBJ upload, interactive 3D face selection.
+ *
+ * Props
+ *   onDone({ sessionId, faces, selectedFaceIds }) → advance wizard
+ */
+import React, { useState, useCallback } from 'react';
 import { api } from '../api/client';
+import ModelViewer from '../components/ModelViewer';
 
-const DEFAULTS = { width: 10, depth: 8, height: 3, roof_slope_deg: 30 };
-
-export default function StepModel({ sessionId, onDone }) {
-  const [mode, setMode] = useState('parametric'); // 'parametric' | 'obj'
-  const [params, setParams] = useState(DEFAULTS);
+export default function StepModel({ onDone }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [faces, setFaces] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(new Set());   // empty = all
 
-  const handleParametric = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const data = await api.parametricBuilding({ session_id: sessionId, ...params });
-      setPreview(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleObj = async (e) => {
-    const file = e.target.files[0];
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
     if (!file) return;
     setError(null);
     setLoading(true);
     try {
-      const data = await api.uploadObj(sessionId, file);
-      setPreview(data);
+      const data = await api.uploadObj(file);
+      setSessionId(data.session_id);
+      setFaces(data.faces);
+      setSelectedIds(new Set());   // reset selection → all
     } catch (err) {
       setError(err.message);
     } finally {
@@ -38,81 +32,116 @@ export default function StepModel({ sessionId, onDone }) {
     }
   };
 
-  const set = (key) => (e) =>
-    setParams((p) => ({ ...p, [key]: parseFloat(e.target.value) || 0 }));
+  // Drag-and-drop support
+  const [dragging, setDragging] = useState(false);
+  const onDrop = useCallback((e) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFile({ target: { files: [file] } });
+  }, []);
+
+  const toggleFace = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll  = () => setSelectedIds(new Set());
+  const deselectAll = () => setSelectedIds(new Set(faces.map(f => f.id)));
+
+  // "selected" in the UI means "will be simulated"
+  // selectedIds.size === 0 → ALL selected
+  const isSelected = (id) => selectedIds.size === 0 || !selectedIds.has(id);
+
+  const handleNext = () => {
+    onDone({
+      sessionId,
+      faces,
+      // Pass empty array when all selected (backend interprets [] as all)
+      selectedFaceIds: selectedIds.size === 0 ? [] : [...selectedIds],
+    });
+  };
 
   return (
     <div className="card">
-      <h2>Define 3D Building Model</h2>
+      <h2>Upload 3D Model</h2>
+      <p className="hint">
+        Upload an OBJ file of your building or surface. Each named object (<code>o</code>) in the file
+        becomes a selectable surface. Coordinate system: <strong>X = East, Y = North, Z = Up</strong>.
+      </p>
 
-      <div className="tab-bar">
-        <button className={mode === 'parametric' ? 'tab active' : 'tab'} onClick={() => setMode('parametric')}>
-          Parametric Builder
-        </button>
-        <button className={mode === 'obj' ? 'tab active' : 'tab'} onClick={() => setMode('obj')}>
-          Upload OBJ File
-        </button>
-      </div>
-
-      {mode === 'parametric' && (
-        <div>
-          <p className="hint">Define a simple box building. Coordinates: X = East, Y = North, Z = Up.</p>
-          <div className="param-grid">
-            <ParamInput label="Width (E-W) m" value={params.width} onChange={set('width')} />
-            <ParamInput label="Depth (N-S) m" value={params.depth} onChange={set('depth')} />
-            <ParamInput label="Wall Height m" value={params.height} onChange={set('height')} />
-            <ParamInput label="Roof Slope °" value={params.roof_slope_deg} onChange={set('roof_slope_deg')} min={0} max={60} />
-          </div>
-          <button className="btn-secondary" onClick={handleParametric} disabled={loading}>
-            {loading ? 'Generating…' : 'Generate Building'}
-          </button>
-        </div>
-      )}
-
-      {mode === 'obj' && (
-        <div>
-          <p className="hint">Upload an OBJ file of your building. Use Ladybug/Rhino/Blender to export.</p>
-          <label className="file-drop">
-            <input type="file" accept=".obj" onChange={handleObj} />
-            <span>{loading ? 'Parsing OBJ…' : 'Click or drag your .obj file here'}</span>
-          </label>
-        </div>
-      )}
+      {/* Drop zone */}
+      <label
+        className={`file-drop ${dragging ? 'dragging' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
+      >
+        <input type="file" accept=".obj" onChange={handleFile} />
+        <span>
+          {loading ? '⏳ Parsing OBJ…'
+            : dragging ? '📂 Drop to upload'
+            : '📁 Click or drag your .obj file here'}
+        </span>
+      </label>
 
       {error && <p className="error">{error}</p>}
 
-      {preview && (
-        <div className="preview-box">
-          <h3>Model loaded — {preview.face_count} surfaces detected</h3>
-          <table>
-            <thead>
-              <tr><th>Surface</th><th>Normal (X,Y,Z)</th><th>Area (m²)</th></tr>
-            </thead>
-            <tbody>
-              {preview.faces.map((f) => (
-                <tr key={f.id}>
-                  <td>{f.id}</td>
-                  <td>{f.normal.map((n) => n.toFixed(2)).join(', ')}</td>
-                  <td>{f.area.toFixed(1)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <button className="btn-primary" onClick={() => onDone(preview.faces)}>
-            Next: Run Simulation →
+      {faces.length > 0 && (
+        <>
+          <div className="viewer-face-layout">
+            {/* 3D Viewer */}
+            <div className="viewer-pane">
+              <ModelViewer
+                faces={faces}
+                selectedIds={selectedIds}
+                onFaceClick={toggleFace}
+                mode="selection"
+                height="380px"
+              />
+            </div>
+
+            {/* Face list panel */}
+            <div className="face-list-pane">
+              <div className="face-list-header">
+                <span>{faces.length} surfaces</span>
+                <div className="face-list-actions">
+                  <button className="link-btn" onClick={selectAll}>All</button>
+                  <button className="link-btn" onClick={deselectAll}>None</button>
+                </div>
+              </div>
+              <div className="face-list">
+                {faces.map((f) => {
+                  const sel = isSelected(f.id);
+                  return (
+                    <div
+                      key={f.id}
+                      className={`face-row ${sel ? 'selected' : ''}`}
+                      onClick={() => toggleFace(f.id)}
+                    >
+                      <input type="checkbox" checked={sel} onChange={() => {}} />
+                      <span className="face-name">{f.name}</span>
+                      <span className="face-area">{f.area.toFixed(1)} m²</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="selection-hint">
+                {selectedIds.size === 0
+                  ? `All ${faces.length} surfaces will be simulated`
+                  : `${faces.length - selectedIds.size} of ${faces.length} selected`}
+              </p>
+            </div>
+          </div>
+
+          <button className="btn-primary" onClick={handleNext}>
+            Next: Set Location & Run →
           </button>
-        </div>
+        </>
       )}
     </div>
-  );
-}
-
-function ParamInput({ label, value, onChange, min, max }) {
-  return (
-    <label className="param-input">
-      <span>{label}</span>
-      <input type="number" value={value} onChange={onChange}
-        step="0.5" min={min ?? 0.5} max={max ?? 200} />
-    </label>
   );
 }

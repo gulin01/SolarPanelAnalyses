@@ -1,145 +1,162 @@
 """
-Core solar radiation simulation using Ladybug Tools.
+Solar radiation simulation using pvlib (clear-sky Ineichen model).
 
-Algorithm (simplified isotropic sky model):
-  For each hour of the year:
-    1. Compute sun position from EPW location via Sunpath.
-    2. Skip if sun is below horizon (altitude ≤ 0).
-    3. For each building face:
-       a. Direct component:  DNI × max(0, face_normal · sun_to_sky)
-       b. Diffuse component: DHI × (1 + cos θ_tilt) / 2
-          where θ_tilt is the angle of the face normal from vertical.
-    4. Accumulate hourly contributions → annual irradiation (Wh/m²).
+Workflow per face:
+  1. Derive surface_tilt and surface_azimuth from the face's outward normal.
+  2. Call pvlib.irradiance.get_total_irradiance() (Hay-Davies model) for
+     every hour in the time range.
+  3. Accumulate Plane-Of-Array (POA) irradiance → kWh/m².
+
+Coordinate system: X = East, Y = North, Z = Up
+pvlib azimuth convention: North = 0°, East = 90°, South = 180°, West = 270°
+
+Face normal → pvlib surface parameters:
+  surface_tilt    = arccos(nz)              [0° = horizontal, 90° = vertical]
+  surface_azimuth = (atan2(nx, ny) + 360) % 360
 """
 from __future__ import annotations
 import math
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from ladybug.epw import EPW
-from ladybug.sunpath import Sunpath
-from ladybug_geometry.geometry3d.pointvector import Vector3D
+import pvlib
+import pandas as pd
+from timezonefinder import TimezoneFinder
+
+_tf = TimezoneFinder()
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-# ─── public entry point ────────────────────────────────────────────────────────
+# ─── public entry points ───────────────────────────────────────────────────────
 
-def run_simulation(epw_path: str, faces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def run_simulation(
+    lat: float,
+    lon: float,
+    faces: List[Dict[str, Any]],
+    analysis_type: str = "annual",   # "annual" | "daily"
+    date_str: Optional[str] = None,  # "YYYY-MM-DD" (required for daily)
+    elevation: float = 0.0,
+) -> Dict[str, Any]:
     """
-    Simulate annual solar irradiation on building faces.
+    Run solar radiation simulation and return ranked results.
 
     Parameters
     ----------
-    epw_path : path to the EPW weather file
-    faces    : list of face dicts produced by geometry.py
-                Each dict must contain:
-                  "id"       : str
-                  "normal"   : [nx, ny, nz]
-                  "area"     : float (m²)
-                  "centroid" : [cx, cy, cz]
-                  "vertices" : [[x,y,z], ...]
+    lat / lon    : location decimal degrees
+    faces        : list of face dicts (id, name, normal, area, centroid)
+    analysis_type: "annual" or "daily"
+    date_str     : ISO date string for daily mode
+    elevation    : site elevation in metres
 
     Returns
     -------
-    List of result dicts, one per face, sorted by annual_irradiation descending.
-    Each result:
-      id, area, centroid, normal, vertices,
-      annual_irradiation_wh_m2, annual_irradiation_kwh_m2,
-      suitability_score (0–100), recommendation, monthly_kwh_m2
+    Dict with keys: type, timezone, faces (sorted by radiation, desc)
+    Plus: year (annual) or date/sunrise_hour/sunset_hour (daily)
     """
-    epw = EPW(epw_path)
-    loc = epw.location
+    tz = _tf.timezone_at(lat=lat, lng=lon) or "UTC"
+    location = pvlib.location.Location(lat, lon, tz=tz, altitude=elevation)
 
-    sunpath = Sunpath(
-        latitude=loc.latitude,
-        longitude=loc.longitude,
-        time_zone=loc.time_zone,
-    )
+    if analysis_type == "annual":
+        times = pd.date_range("2024-01-01", periods=8760, freq="1h", tz=tz)
+    else:
+        if not date_str:
+            raise ValueError("date_str is required for daily analysis")
+        times = pd.date_range(date_str, periods=24, freq="1h", tz=tz)
 
-    dni_values = epw.direct_normal_radiation.values   # Wh/m² per hour
-    dhi_values = epw.diffuse_horizontal_radiation.values
+    solar_pos = location.get_solarposition(times)
+    clearsky = location.get_clearsky(times)
+    dni_extra = pvlib.irradiance.get_extra_radiation(times)  # needed by Hay-Davies
 
-    # Pre-build face normals as Vector3D
-    normals = [Vector3D(*f["normal"]) for f in faces]
+    results: List[Dict[str, Any]] = []
+    for face in faces:
+        tilt, azimuth = _surface_params(face["normal"])
+        poa = pvlib.irradiance.get_total_irradiance(
+            surface_tilt=tilt,
+            surface_azimuth=azimuth,
+            solar_zenith=solar_pos["apparent_zenith"],
+            solar_azimuth=solar_pos["azimuth"],
+            dni=clearsky["dni"],
+            ghi=clearsky["ghi"],
+            dhi=clearsky["dhi"],
+            model="haydavies",
+            dni_extra=dni_extra,
+        )
+        poa_wh = poa["poa_global"].fillna(0.0).clip(lower=0.0)
 
-    # Accumulate [annual, monthly[12]] per face
-    annual = [0.0] * len(faces)
-    monthly = [[0.0] * 12 for _ in range(len(faces))]
-
-    VERTICAL = Vector3D(0, 0, 1)
-
-    for hoy in range(8760):
-        dni = dni_values[hoy]
-        dhi = dhi_values[hoy]
-        if dni == 0 and dhi == 0:
-            continue
-
-        sun = sunpath.calculate_sun_from_hoy(hoy)
-        if sun.altitude <= 0:
-            continue
-
-        # sun_vector in Ladybug points FROM sky TOWARD ground (Z < 0 when sun is up).
-        # Negate it to get the direction FROM surface TOWARD the sun.
-        sv = sun.sun_vector
-        sun_to_sky = Vector3D(-sv.x, -sv.y, -sv.z)
-
-        month_idx = _hoy_to_month(hoy)
-
-        for i, normal in enumerate(normals):
-            # ── direct component ──────────────────────────────────────────
-            cos_inc = _dot(normal, sun_to_sky)
-            direct = dni * max(0.0, cos_inc)
-
-            # ── diffuse component (isotropic sky model) ───────────────────
-            cos_tilt = _dot(normal, VERTICAL)          # 1 = horizontal, 0 = vertical
-            view_factor = (1.0 + max(0.0, cos_tilt)) / 2.0
-            diffuse = dhi * view_factor
-
-            radiation = direct + diffuse
-            annual[i] += radiation
-            monthly[i][month_idx] += radiation
-
-    # Build result list
-    results = []
-    max_irr = max(annual) if annual else 1.0
-
-    for i, face in enumerate(faces):
-        irr_wh = annual[i]
-        irr_kwh = irr_wh / 1000.0
-        score = round((irr_wh / max_irr) * 100, 1) if max_irr > 0 else 0.0
-        monthly_kwh = [round(v / 1000.0, 2) for v in monthly[i]]
-
-        results.append({
+        base = {
             "id": face["id"],
-            "area": round(face["area"], 3),
-            "centroid": face["centroid"],
-            "normal": face["normal"],
-            "vertices": face["vertices"],
-            "annual_irradiation_wh_m2": round(irr_wh, 1),
-            "annual_irradiation_kwh_m2": round(irr_kwh, 2),
-            "suitability_score": score,
-            "recommendation": _recommendation(score),
-            "monthly_kwh_m2": monthly_kwh,
-        })
+            "name": face["name"],
+            "area": face["area"],
+            "surface_tilt_deg": round(tilt, 1),
+            "surface_azimuth_deg": round(azimuth, 1),
+        }
 
-    results.sort(key=lambda r: r["annual_irradiation_kwh_m2"], reverse=True)
-    return results
+        if analysis_type == "annual":
+            monthly_kwh = _monthly_kwh(poa_wh)
+            annual_kwh = round(poa_wh.sum() / 1000.0, 2)
+            base.update({
+                "annual_kwh_m2": annual_kwh,
+                "monthly_kwh_m2": monthly_kwh,
+            })
+        else:
+            hourly = [round(v, 2) for v in poa_wh.tolist()]
+            daily_kwh = round(poa_wh.sum() / 1000.0, 3)
+            peak_idx = int(poa_wh.values.argmax())
+            base.update({
+                "daily_kwh_m2": daily_kwh,
+                "hourly_wh_m2": hourly,
+                "peak_hour": peak_idx,
+                "peak_wh_m2": round(float(poa_wh.iloc[peak_idx]), 1),
+            })
+
+        results.append(base)
+
+    # Sort by primary metric (desc)
+    key = "annual_kwh_m2" if analysis_type == "annual" else "daily_kwh_m2"
+    results.sort(key=lambda r: r[key], reverse=True)
+
+    # Add suitability scores relative to the best face
+    best = results[0][key] if results else 1.0
+    for r in results:
+        score = round((r[key] / best) * 100, 1) if best > 0 else 0.0
+        r["suitability_score"] = score
+        r["recommendation"] = _recommendation(score)
+
+    extra: Dict[str, Any] = {"type": analysis_type, "timezone": tz}
+    if analysis_type == "annual":
+        extra["year"] = 2024
+    else:
+        daylight = solar_pos["apparent_zenith"] < 90
+        hours = [i for i, v in enumerate(daylight) if v]
+        extra["date"] = date_str
+        extra["sunrise_hour"] = hours[0] if hours else 6
+        extra["sunset_hour"] = hours[-1] if hours else 19
+        # Top-level hourly lookup {face_id: [24 W/m²]} — used by frontend time slider
+        extra["hourly"] = {r["id"]: r["hourly_wh_m2"] for r in results}
+
+    return {**extra, "faces": results}
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
 
-def _dot(a: Vector3D, b: Vector3D) -> float:
-    return a.x * b.x + a.y * b.y + a.z * b.z
+def _surface_params(normal: List[float]):
+    """Convert face outward normal to pvlib surface_tilt and surface_azimuth."""
+    nx, ny, nz = normal
+    tilt = math.degrees(math.acos(max(-1.0, min(1.0, nz))))
+    azimuth = (math.degrees(math.atan2(nx, ny)) + 360.0) % 360.0
+    return tilt, azimuth
 
 
-def _hoy_to_month(hoy: int) -> int:
-    """Return 0-based month index for a given hour of year."""
-    days_per_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    day = hoy // 24
-    cumulative = 0
-    for m, days in enumerate(days_per_month):
-        cumulative += days
-        if day < cumulative:
-            return m
-    return 11
+def _monthly_kwh(poa_wh: "pd.Series") -> List[float]:
+    """Sum hourly POA irradiance into 12 monthly kWh/m² values (2024)."""
+    days = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]  # 2024 is leap year
+    monthly: List[float] = []
+    h = 0
+    for d in days:
+        hours = d * 24
+        monthly.append(round(poa_wh.iloc[h:h + hours].sum() / 1000.0, 2))
+        h += hours
+    return monthly
 
 
 def _recommendation(score: float) -> str:
@@ -148,5 +165,5 @@ def _recommendation(score: float) -> str:
     if score >= 60:
         return "Good — suitable for solar panels"
     if score >= 40:
-        return "Moderate — consider if south-facing areas are unavailable"
-    return "Poor — not recommended for solar panels"
+        return "Moderate — consider if better surfaces are unavailable"
+    return "Poor — not recommended"
