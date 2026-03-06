@@ -91,8 +91,11 @@ export default function ModelViewer({
       const positions = [];
       for (const tri of face.triangles) {
         for (const v of tri) {
-          positions.push(v[0], v[1], v[2]);
-          allPts.push(v);
+          // Backend uses Z-up (X=East, Y=North, Z=Up); Three.js uses Y-up.
+          // Convert: Three.X = data.X,  Three.Y = data.Z,  Three.Z = -data.Y
+          const tx = v[0], ty = v[2], tz = -v[1];
+          positions.push(tx, ty, tz);
+          allPts.push([tx, ty, tz]);
         }
       }
       const geom = new THREE.BufferGeometry();
@@ -133,7 +136,7 @@ export default function ModelViewer({
         1,
       );
       const dist = span * 2.2;
-      camera.position.set(cx + dist * 0.7, cy - dist * 0.9, cz + dist * 0.7);
+      camera.position.set(cx + dist * 0.6, cy + dist * 0.8, cz + dist * 0.8);
       camera.lookAt(cx, cy, cz);
       controls.target.set(cx, cy, cz);
     }
