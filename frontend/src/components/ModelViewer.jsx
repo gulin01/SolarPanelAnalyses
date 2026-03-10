@@ -211,12 +211,24 @@ export default function ModelViewer({
       });
     } else {
       meshes.forEach((mesh) => {
-        const selected = selectedIds.has(mesh.userData.faceId);
-        mesh.material.color.set(selected ? 0xf59e0b : 0x4a90d9);
-        mesh.material.emissive.set(selected ? 0xf59e0b : 0x000000);
-        mesh.material.emissiveIntensity = selected ? 0.3 : 0;
-        mesh.material.opacity = selected ? 1 : 0.85;
-        mesh.material.transparent = !selected;
+        const faceId = mesh.userData.faceId;
+        // selectedIds is inverted: IDs in the set are EXCLUDED from simulation
+        const excluded = selectedIds.size > 0 && selectedIds.has(faceId);
+        if (!excluded) {
+          // Included in simulation → blue, full brightness
+          mesh.material.color.set(0x4a90d9);
+          mesh.material.emissive.set(0x4a90d9);
+          mesh.material.emissiveIntensity = 0.18;
+          mesh.material.opacity = 1;
+          mesh.material.transparent = false;
+        } else {
+          // Excluded from simulation → dark grey, semi-transparent
+          mesh.material.color.set(0x334455);
+          mesh.material.emissive.set(0x000000);
+          mesh.material.emissiveIntensity = 0;
+          mesh.material.opacity = 0.3;
+          mesh.material.transparent = true;
+        }
       });
     }
   }, [mode, selectedIds, heatmapValues]);
